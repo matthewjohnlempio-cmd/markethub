@@ -34,16 +34,28 @@ export async function POST(request: Request) {
 
     let accountId = existingSeller?.stripe_account_id;
 
-    // Create a connected account if the seller does not have one.
+    // Create a connected account using Stripe Accounts v2.
     if (!accountId) {
-      const account = await stripe.accounts.create({
-        type: "express",
-        country: "US",
-        email,
-        business_type: "individual",
-        capabilities: {
-          card_payments: { requested: true },
-          transfers: { requested: true },
+      const account = await stripe.v2.core.accounts.create({
+        contact_email: email,
+        display_name: email,
+        dashboard: "full",
+        identity: {
+          country: "us",
+          entity_type: "individual",
+        },
+        configuration: {
+          merchant: {
+            capabilities: {
+              card_payments: { requested: true },
+            },
+          },
+        },
+        defaults: {
+          responsibilities: {
+            fees_collector: "stripe",
+            losses_collector: "stripe",
+          },
         },
         metadata: {
           seller_email: email,
@@ -72,12 +84,16 @@ export async function POST(request: Request) {
     const refreshUrl = new URL("/connect/refresh", origin);
     refreshUrl.searchParams.set("email", email);
 
-    // Generate Stripe's hosted onboarding link.
-    const accountLink = await stripe.accountLinks.create({
+    // Generate a Stripe-hosted onboarding link using Accounts v2.
+    const accountLink = await stripe.v2.core.accountLinks.create({
       account: accountId,
-      refresh_url: refreshUrl.toString(),
-      return_url: returnUrl.toString(),
-      type: "account_onboarding",
+      use_case: {
+        type: "account_onboarding",
+        account_onboarding: {
+            refresh_url: refreshUrl.toString(),
+            return_url: returnUrl.toString(),
+        },
+      },
     });
 
     return NextResponse.json({
