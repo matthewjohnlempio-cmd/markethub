@@ -8,27 +8,35 @@ export const runtime = "nodejs";
 
 export async function POST(request: Request) {
   const signature = request.headers.get("stripe-signature");
-  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
-  if (!signature || !webhookSecret) {
+  const webhookSecrets = [
+    process.env.STRIPE_WEBHOOK_SECRET,
+    process.env.STRIPE_CONNECT_WEBHOOK_SECRET,
+  ].filter((secret): secret is string => Boolean(secret));
+
+  if (!signature || webhookSecrets.length === 0) {
     return NextResponse.json(
       { error: "Missing Stripe webhook configuration." },
       { status: 400 }
     );
   }
 
-  let event: Stripe.Event;
+  const body = await request.text();
 
-  try {
-    const body = await request.text();
+  let event: Stripe.Event | undefined;
 
-    event = stripe.webhooks.constructEvent(
-      body,
-      signature,
-      webhookSecret
-    );
-  } catch (error) {
-    console.error("Stripe webhook signature verification failed:", error);
+  // Try both webhook signing secrets.
+  for (const secret of webhookSecrets) {
+    try {
+      event = stripe.webhooks.constructEvent(body, signature, secret);
+      break;
+    } catch {
+      // Try the next signing secret.
+    }
+  }
+
+  if (!event) {
+    console.error("Stripe webhook signature verification failed.");
 
     return NextResponse.json(
       { error: "Invalid webhook signature." },
@@ -58,7 +66,6 @@ export async function POST(request: Request) {
     if (event.type === "checkout.session.completed") {
       const session = event.data.object as Stripe.Checkout.Session;
 
-      // Ignore payments that have not actually been paid.
       if (session.payment_status !== "paid") {
         return NextResponse.json({ received: true });
       }
@@ -83,8 +90,7 @@ export async function POST(request: Request) {
 
       const platformFee = Math.round(session.amount_total * 0.10);
 
-      // Save the completed order. The unique Checkout session ID
-      // prevents duplicate webhook deliveries from creating duplicate orders.
+      // Save the completed order.
       const { error: orderError } = await supabaseAdmin
         .from("marketplace_orders")
         .upsert(
@@ -108,7 +114,7 @@ export async function POST(request: Request) {
 
       if (orderError) throw orderError;
 
-      // Mark the listing as sold after recording the paid order.
+      // Mark the listing as sold.
       const { error: listingError } = await supabaseAdmin
         .from("marketplace_listings")
         .update({ status: "sold" })
