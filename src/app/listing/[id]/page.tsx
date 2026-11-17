@@ -12,6 +12,7 @@ import {
   Send,
   Loader2,
   CheckCircle,
+  CreditCard,
 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 
@@ -24,6 +25,7 @@ interface Listing {
   category: string;
   image_url: string;
   created_at: string;
+  status?: string;
 }
 
 export default function ListingDetailPage() {
@@ -32,7 +34,6 @@ export default function ListingDetailPage() {
 
   const [listing, setListing] = useState<Listing | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
 
   const [buyerName, setBuyerName] = useState("");
   const [buyerEmail, setBuyerEmail] = useState("");
@@ -40,6 +41,12 @@ export default function ListingDetailPage() {
 
   const [sending, setSending] = useState(false);
   const [success, setSuccess] = useState("");
+  const [error, setError] = useState("");
+
+  const [sellerReady, setSellerReady] = useState(false);
+  const [checkingSeller, setCheckingSeller] = useState(true);
+  const [buying, setBuying] = useState(false);
+  const [checkoutError, setCheckoutError] = useState("");
 
   useEffect(() => {
     async function fetchListing() {
@@ -52,20 +59,94 @@ export default function ListingDetailPage() {
       if (error) {
         console.error(error);
         setError("Listing not found or unavailable.");
-      } else {
-        setListing(data as Listing);
+        setLoading(false);
+        return;
       }
 
+      const currentListing = data as Listing;
+      setListing(currentListing);
       setLoading(false);
+
+      if (currentListing.status === "sold") {
+        setCheckingSeller(false);
+        return;
+      }
+
+      try {
+        const response = await fetch(
+          `/api/stripe/connect/status?email=${encodeURIComponent(
+            currentListing.email.trim().toLowerCase()
+          )}`
+        );
+
+        if (response.ok) {
+          const sellerData = await response.json();
+
+          setSellerReady(
+            sellerData.connected === true ||
+              (sellerData.details_submitted === true &&
+                sellerData.charges_enabled === true &&
+                sellerData.payouts_enabled === true)
+          );
+        }
+      } catch (err) {
+        console.error("Seller status check failed:", err);
+      } finally {
+        setCheckingSeller(false);
+      }
     }
 
     if (id) fetchListing();
   }, [id]);
 
+  async function handleBuyNow() {
+    if (!listing || buying) return;
+
+    setBuying(true);
+    setCheckoutError("");
+
+    try {
+      const response = await fetch("/api/stripe/checkout", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          listingId: listing.id,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          data.error || "Unable to start checkout."
+        );
+      }
+
+      if (!data.url) {
+        throw new Error("Stripe did not return a checkout URL.");
+      }
+
+      window.location.assign(data.url);
+    } catch (err) {
+      console.error("Checkout error:", err);
+
+      setCheckoutError(
+        err instanceof Error
+          ? err.message
+          : "Unable to start checkout. Please try again."
+      );
+
+      setBuying(false);
+    }
+  }
+
   async function handleMessageSubmit(
     e: React.FormEvent<HTMLFormElement>
   ) {
     e.preventDefault();
+
     setSuccess("");
     setError("");
 
@@ -91,7 +172,6 @@ export default function ListingDetailPage() {
 
     setSending(true);
 
-    // Save the buyer's message to Supabase first.
     const { error: messageError } = await supabase
       .from("marketplace_messages")
       .insert({
@@ -108,7 +188,6 @@ export default function ListingDetailPage() {
       return;
     }
 
-    // Send an email notification to the seller.
     try {
       const emailResponse = await fetch("/api/send-email", {
         method: "POST",
@@ -205,13 +284,12 @@ export default function ListingDetailPage() {
         </div>
 
         <div className="grid gap-8 lg:grid-cols-[1.5fr_1fr]">
-          {/* Product information */}
           <div className="space-y-6">
             <div className="overflow-hidden rounded-2xl border border-gray-200 bg-white">
               <img
                 src={listing.image_url}
                 alt={listing.title}
-                className="max-h-[550px] w-full object-contain bg-gray-50"
+                className="max-h-[550px] w-full bg-gray-50 object-contain"
               />
             </div>
 
@@ -220,6 +298,12 @@ export default function ListingDetailPage() {
                 <span className="rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-600">
                   {listing.category}
                 </span>
+
+                {listing.status === "sold" && (
+                  <span className="rounded-full bg-red-50 px-3 py-1 text-xs font-semibold text-red-600">
+                    Sold
+                  </span>
+                )}
               </div>
 
               <h1 className="text-2xl font-bold sm:text-3xl">
@@ -240,13 +324,16 @@ export default function ListingDetailPage() {
               <div className="my-7 border-t border-gray-100" />
 
               <h2 className="text-lg font-bold">Description</h2>
+
               <p className="mt-3 whitespace-pre-wrap text-sm leading-7 text-gray-600">
                 {listing.description}
               </p>
 
               <div className="my-7 border-t border-gray-100" />
 
-              <h2 className="mb-3 text-lg font-bold">Seller Information</h2>
+              <h2 className="mb-3 text-lg font-bold">
+                Seller Information
+              </h2>
 
               <div className="flex items-center gap-3 rounded-xl bg-gray-50 p-4">
                 <div className="flex h-11 w-11 items-center justify-center rounded-full bg-blue-100 text-blue-600">
@@ -263,96 +350,151 @@ export default function ListingDetailPage() {
             </div>
           </div>
 
-          {/* Message seller */}
           <div>
-            <div className="sticky top-6 rounded-2xl border border-gray-200 bg-white p-6 shadow-sm">
-              <h2 className="text-xl font-bold">Message Seller</h2>
+            <div className="sticky top-6 space-y-5">
+              <div className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm">
+                <h2 className="text-xl font-bold">Purchase This Item</h2>
 
-              <p className="mt-2 text-sm leading-6 text-gray-500">
-                Interested in this item? Send the seller a message to ask
-                questions or discuss the purchase.
-              </p>
-
-              <form onSubmit={handleMessageSubmit} className="mt-6 space-y-4">
-                <div>
-                  <label className="mb-2 block text-sm font-semibold">
-                    Your Name
-                  </label>
-                  <input
-                    required
-                    maxLength={100}
-                    value={buyerName}
-                    onChange={(e) => setBuyerName(e.target.value)}
-                    placeholder="Enter your name"
-                    className="w-full rounded-xl border border-gray-200 px-4 py-3 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-                  />
-                </div>
-
-                <div>
-                  <label className="mb-2 block text-sm font-semibold">
-                    Your Email
-                  </label>
-                  <input
-                    required
-                    type="email"
-                    maxLength={254}
-                    value={buyerEmail}
-                    onChange={(e) => setBuyerEmail(e.target.value)}
-                    placeholder="you@example.com"
-                    className="w-full rounded-xl border border-gray-200 px-4 py-3 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-                  />
-                </div>
-
-                <div>
-                  <label className="mb-2 block text-sm font-semibold">
-                    Message
-                  </label>
-                  <textarea
-                    required
-                    maxLength={2000}
-                    rows={5}
-                    value={message}
-                    onChange={(e) => setMessage(e.target.value)}
-                    placeholder="Hi! Is this item still available?"
-                    className="w-full resize-none rounded-xl border border-gray-200 px-4 py-3 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-                  />
-                </div>
-
-                {error && (
-                  <div className="rounded-xl bg-red-50 p-3 text-sm text-red-600">
-                    {error}
-                  </div>
-                )}
-
-                {success && (
-                  <div className="flex items-start gap-2 rounded-xl bg-green-50 p-3 text-sm text-green-700">
-                    <CheckCircle size={18} className="shrink-0" />
-                    {success}
-                  </div>
-                )}
-
-                <button
-                  type="submit"
-                  disabled={sending}
-                  className="flex w-full items-center justify-center gap-2 rounded-xl bg-blue-600 px-5 py-3.5 text-sm font-semibold text-white transition hover:bg-blue-700 disabled:opacity-60"
-                >
-                  {sending ? (
-                    <>
-                      <Loader2 size={18} className="animate-spin" />
-                      Sending...
-                    </>
-                  ) : (
-                    <>
-                      <Send size={18} />
-                      Send Message
-                    </>
-                  )}
-                </button>
-
-                <p className="text-center text-xs text-gray-400">
-                  Your message will be saved in our marketplace database and an email notification will be sent to the seller.
+                <p className="mt-2 text-sm leading-6 text-gray-500">
+                  Complete your purchase securely through Stripe Checkout.
                 </p>
-              </form>
+
+                {listing.status === "sold" ? (
+                  <div className="mt-6 rounded-xl bg-red-50 p-4 text-center text-sm font-semibold text-red-600">
+                    This item has already been sold.
+                  </div>
+                ) : checkingSeller ? (
+                  <div className="mt-6 flex items-center justify-center gap-2 rounded-xl bg-gray-100 py-3 text-sm text-gray-500">
+                    <Loader2 size={17} className="animate-spin" />
+                    Checking seller payment status...
+                  </div>
+                ) : sellerReady ? (
+                  <button
+                    onClick={handleBuyNow}
+                    disabled={buying}
+                    className="mt-6 flex w-full items-center justify-center gap-2 rounded-xl bg-blue-600 px-5 py-3.5 text-sm font-semibold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {buying ? (
+                      <>
+                        <Loader2 size={18} className="animate-spin" />
+                        Redirecting to Checkout...
+                      </>
+                    ) : (
+                      <>
+                        <CreditCard size={18} />
+                        Buy Now
+                      </>
+                    )}
+                  </button>
+                ) : (
+                  <div className="mt-6 rounded-xl bg-gray-50 p-4 text-center text-sm text-gray-500">
+                    Online checkout is not available yet because the seller has not completed Stripe onboarding.
+                  </div>
+                )}
+
+                {checkoutError && (
+                  <div className="mt-4 rounded-xl bg-red-50 p-3 text-sm text-red-600">
+                    {checkoutError}
+                  </div>
+                )}
+
+                <p className="mt-3 text-center text-xs text-gray-400">
+                  Secure payment powered by Stripe.
+                </p>
+              </div>
+
+              <div className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm">
+                <h2 className="text-xl font-bold">Message Seller</h2>
+
+                <p className="mt-2 text-sm leading-6 text-gray-500">
+                  Have questions about this item? Send the seller a message.
+                </p>
+
+                <form
+                  onSubmit={handleMessageSubmit}
+                  className="mt-6 space-y-4"
+                >
+                  <div>
+                    <label className="mb-2 block text-sm font-semibold">
+                      Your Name
+                    </label>
+                    <input
+                      required
+                      maxLength={100}
+                      value={buyerName}
+                      onChange={(e) => setBuyerName(e.target.value)}
+                      placeholder="Enter your name"
+                      className="w-full rounded-xl border border-gray-200 px-4 py-3 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="mb-2 block text-sm font-semibold">
+                      Your Email
+                    </label>
+                    <input
+                      required
+                      type="email"
+                      maxLength={254}
+                      value={buyerEmail}
+                      onChange={(e) => setBuyerEmail(e.target.value)}
+                      placeholder="you@example.com"
+                      className="w-full rounded-xl border border-gray-200 px-4 py-3 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="mb-2 block text-sm font-semibold">
+                      Message
+                    </label>
+                    <textarea
+                      required
+                      maxLength={2000}
+                      rows={5}
+                      value={message}
+                      onChange={(e) => setMessage(e.target.value)}
+                      placeholder="Hi! Is this item still available?"
+                      className="w-full resize-none rounded-xl border border-gray-200 px-4 py-3 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                    />
+                  </div>
+
+                  {error && (
+                    <div className="rounded-xl bg-red-50 p-3 text-sm text-red-600">
+                      {error}
+                    </div>
+                  )}
+
+                  {success && (
+                    <div className="flex items-start gap-2 rounded-xl bg-green-50 p-3 text-sm text-green-700">
+                      <CheckCircle size={18} className="shrink-0" />
+                      {success}
+                    </div>
+                  )}
+
+                  <button
+                    type="submit"
+                    disabled={sending}
+                    className="flex w-full items-center justify-center gap-2 rounded-xl bg-blue-600 px-5 py-3.5 text-sm font-semibold text-white transition hover:bg-blue-700 disabled:opacity-60"
+                  >
+                    {sending ? (
+                      <>
+                        <Loader2 size={18} className="animate-spin" />
+                        Sending...
+                      </>
+                    ) : (
+                      <>
+                        <Send size={18} />
+                        Send Message
+                      </>
+                    )}
+                  </button>
+
+                  <p className="text-center text-xs text-gray-400">
+                    Your message will be saved in our marketplace database
+                    and an email notification will be sent to the seller.
+                  </p>
+                </form>
+              </div>
             </div>
           </div>
         </div>
