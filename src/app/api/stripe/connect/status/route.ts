@@ -32,14 +32,22 @@ export async function GET(request: Request) {
       );
     }
 
-    const account = await stripe.accounts.retrieve(
-      seller.stripe_account_id
+    const account = await stripe.v2.core.accounts.retrieve(
+      seller.stripe_account_id,
+      {
+        include: ["configuration.merchant", "requirements"],
+      }
     );
 
+    const cardPaymentsStatus =
+      account.configuration?.merchant?.capabilities?.card_payments?.status;
+
+    const isReady = cardPaymentsStatus === "active";
+
     const status = {
-      details_submitted: account.details_submitted ?? false,
-      charges_enabled: account.charges_enabled ?? false,
-      payouts_enabled: account.payouts_enabled ?? false,
+      details_submitted: isReady,
+      charges_enabled: isReady,
+      payouts_enabled: isReady,
     };
 
     const { error: updateError } = await supabaseAdmin
@@ -53,11 +61,9 @@ export async function GET(request: Request) {
     if (updateError) throw updateError;
 
     return NextResponse.json({
-      connected:
-        status.details_submitted &&
-        status.charges_enabled &&
-        status.payouts_enabled,
+      connected: isReady,
       ...status,
+      capability_status: cardPaymentsStatus ?? "unknown",
     });
   } catch (error) {
     console.error("Stripe account status error:", error);
